@@ -10,6 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js">
+    <link rel="manifest" href="manifest.json">
     </script>
     <script>
         tailwind.config = {
@@ -1487,6 +1488,13 @@
                 saveState();
             }
         });
+       
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js")
+      .then(reg => console.log("Service Worker registrado:", reg))
+      .catch(err => console.error("Error al registrar SW:", err));
+  }
+
     </script>
 </body>
 </html>
