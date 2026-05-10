@@ -24,5 +24,46 @@
       "sizes": "512x512",
       "type": "image/png"
     }
+  ],
+  "shortcuts": [
+    {
+      "name": "Nueva actividad",
+      "short_name": "Nueva",
+      "description": "Registrar una nueva actividad",
+      "url": "/nueva.html",
+      "icons": [{ "src": "img1.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Historial",
+      "short_name": "Historial",
+      "description": "Ver actividades anteriores",
+      "url": "/historial.html",
+      "icons": [{ "src": "img2.png", "sizes": "192x192" }]
+    }
+  ],
+  "share_target": {
+    "action": "/compartir.html",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "titulo",
+      "text": "texto",
+      "url": "url"
+    }
+  },
+  "file_handlers": [
+    {
+      "action": "/abrir.html",
+      "accept": {
+        "application/json": [".json"],
+        "text/plain": [".txt"]
+      }
+    }
+  ],
+  "protocol_handlers": [
+    {
+      "protocol": "web+actividad",
+      "url": "/abrir-protocolo.html?dato=%s"
+    }
   ]
 }
