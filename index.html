@@ -346,59 +346,37 @@
             return getDateStr(monday);
         }
 
-        // --- FULLSCREEN PERSISTENTE (siempre intenta estar en pantalla completa) ---
-let fullscreenActivated = false;
+        // --- FULLSCREEN ---
+        function activateFullscreen() {
+            if (fullscreenActivated) return;
+            fullscreenActivated = true;
+            const hint = document.getElementById('fullscreen-hint');
+            if (hint) {
+                hint.style.opacity = '0';
+                hint.style.transition = 'opacity 0.3s';
+                setTimeout(() => hint.remove(), 300);
+            }
+            const doc = document.documentElement;
+            if (doc.requestFullscreen) {
+                doc.requestFullscreen().catch(() => {});
+            } else if (doc.webkitRequestFullscreen) {
+                doc.webkitRequestFullscreen();
+            } else if (doc.msRequestFullscreen) {
+                doc.msRequestFullscreen();
+            }
+        }
 
-function requestFullscreen() {
-    const doc = document.documentElement;
-    if (doc.requestFullscreen) {
-        doc.requestFullscreen().catch(() => {});
-    } else if (doc.webkitRequestFullscreen) {
-        doc.webkitRequestFullscreen();
-    } else if (doc.msRequestFullscreen) {
-        doc.msRequestFullscreen();
-    }
-}
+        document.addEventListener('click', function fullscreenHandler(e) {
+            if (!fullscreenActivated) {
+                activateFullscreen();
+            }
+        }, { once: false });
 
-function activateFullscreen() {
-    // Si ya estamos en pantalla completa, no hacer nada
-    if (document.fullscreenElement) return;
-    requestFullscreen();
-    // Ocultar mensaje de ayuda (opcional)
-    const hint = document.getElementById('fullscreen-hint');
-    if (hint) {
-        hint.style.opacity = '0';
-        hint.style.transition = 'opacity 0.3s';
-        setTimeout(() => hint.remove(), 300);
-    }
-}
-
-// Intento inicial (puede fallar sin gesto del usuario, pero queda registrado)
-window.addEventListener('load', () => {
-    requestFullscreen();
-});
-
-// Cualquier clic o toque reintenta si no está en fullscreen
-document.addEventListener('click', () => {
-    if (!document.fullscreenElement) {
-        requestFullscreen();
-    }
-});
-document.addEventListener('touchstart', () => {
-    if (!document.fullscreenElement) {
-        requestFullscreen();
-    }
-});
-
-// Si se sale de pantalla completa, vuelve a intentarlo de inmediato
-document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement) {
-        fullscreenActivated = false;
-        requestFullscreen(); // Inmediato tras salir
-    } else {
-        fullscreenActivated = true;
-    }
-});
+        document.addEventListener('touchstart', function fullscreenHandlerTouch(e) {
+            if (!fullscreenActivated) {
+                activateFullscreen();
+            }
+        }, { once: false });
         // --- NAVIGATION ---
         function switchView(viewId) {
             currentView = viewId;
