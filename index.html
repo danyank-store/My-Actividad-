@@ -9,9 +9,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js">
     <link rel="manifest" href="manifest.json">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js">
     </script>
+    <link rel="manifest" href="manifest.json">
     <script>
         tailwind.config = {
             theme: {
@@ -137,7 +138,6 @@
             -moz-appearance: textfield;
         }
 
-        /* Estilos para captura de imagen */
         .capture-area {
             background: #f8fafc !important;
         }
@@ -147,13 +147,24 @@
         .capture-area .bg-slate-800 {
             background: #1e293b !important;
         }
+
+        /* NUEVO: Estilos para el time picker tipo reloj */
+        .time-picker-btn {
+            transition: all 0.15s ease;
+        }
+        .time-picker-btn:active {
+            transform: scale(0.9);
+            background: #e2e8f0;
+        }
+        .time-picker-display {
+            font-variant-numeric: tabular-nums;
+            letter-spacing: 2px;
+        }
     </style>
 </head>
 <body class="h-full flex flex-col overflow-hidden">
 
-    
-
-      <header class="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center z-20">
+    <header class="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center z-20">
         <div class="flex items-center gap-2">
             <div class="w-8 h-8 bg-primary rounded-lg flex items-center justify-center text-white font-bold text-xl">T</div>
             <h1 class="text-xl font-bold text-slate-800 tracking-tight">Tiempo de Campo <span class="text-primary">Pro</span></h1>
@@ -199,6 +210,13 @@
         </div>
     </div>
 
+    <!-- NUEVO: Notificación persistente del cronómetro (se muestra cuando está en segundo plano) -->
+    <div id="chrono-background-notification" class="fixed top-4 right-4 z-[70] bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl flex items-center gap-3 transform scale-0 transition-transform duration-300">
+        <div class="w-3 h-3 bg-accent rounded-full animate-pulse"></div>
+        <span id="chrono-bg-time" class="font-bold tabular-nums text-lg">00:00:00</span>
+        <span class="text-xs text-slate-400">en curso</span>
+    </div>
+
     <script>
         // --- APP STATE & STORAGE ---
         const STORAGE_KEY = 'TiempoCampoPro_v3_State';
@@ -228,6 +246,13 @@
         let historialSearchTerm = '';
         let fullscreenActivated = false;
 
+        // NUEVO: Variables para el time picker y wake lock
+        let _timePickerMinutes = 0;
+        let wakeLock = null;
+        let wakeLockSupported = false;
+        let chronoNotificationInterval = null;
+        let notificationsPermission = 'default';
+
         // --- CORE UTILS ---
         function saveState() {
             state.lastBackupDate = getDateStr(new Date());
@@ -248,11 +273,9 @@
                     if (!state.userSettings.weeklyGoal) state.userSettings.weeklyGoal = state.userSettings.monthlyGoal / 4;
                 } catch (e) { console.error(e); }
             }
-            // Asegurar que los arrays existan
             if (!state.dailyRecords) state.dailyRecords = [];
             if (!state.studies) state.studies = [];
             if (!state.revisits) state.revisits = [];
-            // Asegurar campos en cada revisita
             state.revisits.forEach(r => {
                 if (!r.plannedVisitDate) r.plannedVisitDate = null;
                 if (!r.priority) r.priority = 'Normal';
@@ -261,6 +284,14 @@
                 if (!r.attendedStudies) r.attendedStudies = [];
                 if (!r.attendedRevisits) r.attendedRevisits = [];
             });
+
+            // NUEVO: Si el cronómetro estaba corriendo al recargar, recalcular el tiempo acumulado
+            if (state.chronometer.state === 'Running' && state.chronometer.startTime) {
+                const elapsed = Date.now() - state.chronometer.startTime;
+                state.chronometer.accumulatedMs += elapsed;
+                state.chronometer.startTime = Date.now(); // Reiniciar startTime para seguir corriendo
+                // Lo dejamos en Running para que el intervalo lo retome
+            }
         }
 
         function notify(msg) {
@@ -346,7 +377,6 @@
                 activateFullscreen();
             }
         }, { once: false });
-
         // --- NAVIGATION ---
         function switchView(viewId) {
             currentView = viewId;
@@ -413,7 +443,7 @@
             return streak;
         }
 
-        // --- HOY VIEW (con plan del día mejorado) ---
+        // --- HOY VIEW ---
         function renderHoyView(container) {
             const todayStr = getDateStr(new Date());
             const todayRecord = state.dailyRecords.find(r => r.date === todayStr);
@@ -470,9 +500,7 @@
             const planList = document.getElementById('today-plan-list');
             if (!planList) return;
             const todayStr = getDateStr(new Date());
-            // Estudios con sesiones planeadas para hoy
             const plannedStudies = state.studies.filter(s => s.sessions?.some(ses => ses.date === todayStr));
-            // Revisitas con plannedVisitDate igual a hoy
             const plannedRevisits = state.revisits.filter(r => r.plannedVisitDate === todayStr);
             if (plannedStudies.length === 0 && plannedRevisits.length === 0) {
                 planList.innerHTML =
@@ -500,7 +528,196 @@
             }).reduce((acc, curr) => acc + (curr.totalMinutes / 60), 0);
         }
 
-        // --- CRONÓMETRO CORREGIDO ---
+        // --- NUEVO: Funciones de Time Picker tipo reloj ---
+        function generateTimePickerHtml(currentMinutes = 0) {
+            const hours = Math.floor(currentMinutes / 60);
+            const mins = currentMinutes % 60;
+            _timePickerMinutes = currentMinutes;
+            return `
+                <div class="flex items-center justify-center gap-3 my-2">
+                    <div class="flex flex-col items-center">
+                        <button type="button" onclick="adjustTimePicker('hours', 1)" class="time-picker-btn w-14 h-12 bg-slate-100 hover:bg-slate-200 rounded-2xl text-slate-600 font-bold text-lg transition-all select-none">+</button>
+                        <div id="time-picker-hours" class="time-picker-display text-5xl font-black text-slate-800 my-2 w-20 text-center select-none">${hours.toString().padStart(2,'0')}</div>
+                        <button type="button" onclick="adjustTimePicker('hours', -1)" class="time-picker-btn w-14 h-12 bg-slate-100 hover:bg-slate-200 rounded-2xl text-slate-600 font-bold text-lg transition-all select-none">−</button>
+                        <span class="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wider">Horas</span>
+                    </div>
+                    <div class="text-5xl font-black text-slate-300 mb-6 select-none">:</div>
+                    <div class="flex flex-col items-center">
+                        <button type="button" onclick="adjustTimePicker('minutes', 5)" class="time-picker-btn w-14 h-12 bg-slate-100 hover:bg-slate-200 rounded-2xl text-slate-600 font-bold text-lg transition-all select-none">+</button>
+                        <div id="time-picker-minutes" class="time-picker-display text-5xl font-black text-slate-800 my-2 w-20 text-center select-none">${mins.toString().padStart(2,'0')}</div>
+                        <button type="button" onclick="adjustTimePicker('minutes', -5)" class="time-picker-btn w-14 h-12 bg-slate-100 hover:bg-slate-200 rounded-2xl text-slate-600 font-bold text-lg transition-all select-none">−</button>
+                        <span class="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wider">Min</span>
+                    </div>
+                </div>
+                <p class="text-center text-xs text-slate-400 mt-1">Total: <span id="time-picker-total" class="font-bold text-slate-600">${hours}h ${mins}m</span></p>
+            `;
+        }
+
+        function adjustTimePicker(unit, delta) {
+            let hours = parseInt(document.getElementById('time-picker-hours')?.textContent || '0');
+            let minutes = parseInt(document.getElementById('time-picker-minutes')?.textContent || '0');
+
+            if (unit === 'hours') {
+                hours = Math.max(0, Math.min(23, hours + delta));
+            } else if (unit === 'minutes') {
+                minutes += delta;
+                if (minutes >= 60) {
+                    minutes -= 60;
+                    hours = Math.min(23, hours + 1);
+                } else if (minutes < 0) {
+                    minutes += 60;
+                    hours = Math.max(0, hours - 1);
+                }
+                minutes = Math.max(0, Math.min(59, minutes));
+                // Redondear a múltiplos de 5 para mantener consistencia con los botones
+                minutes = Math.round(minutes / 5) * 5;
+                if (minutes === 60) {
+                    minutes = 0;
+                    hours = Math.min(23, hours + 1);
+                }
+            }
+
+            _timePickerMinutes = hours * 60 + minutes;
+
+            const hoursEl = document.getElementById('time-picker-hours');
+            const minsEl = document.getElementById('time-picker-minutes');
+            const totalEl = document.getElementById('time-picker-total');
+            if (hoursEl) hoursEl.textContent = hours.toString().padStart(2, '0');
+            if (minsEl) minsEl.textContent = minutes.toString().padStart(2, '0');
+            if (totalEl) totalEl.textContent = `${hours}h ${minutes}m`;
+        }
+
+        function getTimePickerTotalMinutes() {
+            return _timePickerMinutes;
+        }
+
+        function setTimePickerMinutes(minutes) {
+            _timePickerMinutes = Math.max(0, minutes);
+            const hours = Math.floor(_timePickerMinutes / 60);
+            const mins = _timePickerMinutes % 60;
+            const hoursEl = document.getElementById('time-picker-hours');
+            const minsEl = document.getElementById('time-picker-minutes');
+            const totalEl = document.getElementById('time-picker-total');
+            if (hoursEl) hoursEl.textContent = hours.toString().padStart(2, '0');
+            if (minsEl) minsEl.textContent = mins.toString().padStart(2, '0');
+            if (totalEl) totalEl.textContent = `${hours}h ${mins}m`;
+        }
+
+        // --- NUEVO: Wake Lock para mantener el cronómetro activo ---
+        async function requestWakeLock() {
+            if ('wakeLock' in navigator) {
+                wakeLockSupported = true;
+                try {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    wakeLock.addEventListener('release', () => {
+                        // Si se liberó y el cronómetro sigue corriendo, intentar readquirir
+                        if (state.chronometer.state === 'Running') {
+                            requestWakeLock();
+                        }
+                    });
+                } catch (err) {
+                    console.log('Wake Lock no disponible:', err);
+                }
+            }
+        }
+
+        async function releaseWakeLock() {
+            if (wakeLock) {
+                try {
+                    await wakeLock.release();
+                    wakeLock = null;
+                } catch (err) {
+                    console.log('Error al liberar Wake Lock:', err);
+                }
+            }
+        }
+
+        // --- NUEVO: Solicitar permiso de notificaciones ---
+        async function requestNotificationPermission() {
+            if ('Notification' in window && notificationsPermission === 'default') {
+                const result = await Notification.requestPermission();
+                notificationsPermission = result;
+            }
+        }
+
+        // --- NUEVO: Mostrar notificación del cronómetro en segundo plano ---
+        function showChronoBackgroundNotification() {
+            if (state.chronometer.state !== 'Running') return;
+            const totalMs = state.chronometer.accumulatedMs + (state.chronometer.startTime ? (Date.now() - state
+                .chronometer.startTime) : 0);
+            const timeStr = formatTime(totalMs);
+
+            // Actualizar el badge flotante
+            const bgNotif = document.getElementById('chrono-background-notification');
+            const bgTime = document.getElementById('chrono-bg-time');
+            if (bgNotif && bgTime) {
+                bgTime.textContent = timeStr;
+                bgNotif.classList.remove('scale-0');
+                bgNotif.classList.add('scale-100');
+            }
+
+            // Intentar mostrar notificación del sistema si hay permiso
+            if (notificationsPermission === 'granted' && document.hidden) {
+                try {
+                    // Cancelar notificaciones anteriores del cronómetro
+                    if (window._chronoNotification) {
+                        window._chronoNotification.close();
+                    }
+                    window._chronoNotification = new Notification('⏱️ Cronómetro activo', {
+                        body: `Tiempo en curso: ${timeStr}`,
+                        icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="%231A73E8"/><text x="50" y="55" text-anchor="middle" fill="white" font-size="40" font-weight="bold">T</text></svg>',
+                        tag: 'chrono-notification',
+                        requireInteraction: false,
+                        silent: true,
+                    });
+                } catch (e) {
+                    // Fallback silencioso
+                }
+            }
+        }
+
+        function hideChronoBackgroundNotification() {
+            const bgNotif = document.getElementById('chrono-background-notification');
+            if (bgNotif) {
+                bgNotif.classList.remove('scale-100');
+                bgNotif.classList.add('scale-0');
+            }
+            if (window._chronoNotification) {
+                window._chronoNotification.close();
+                window._chronoNotification = null;
+            }
+            if (chronoNotificationInterval) {
+                clearInterval(chronoNotificationInterval);
+                chronoNotificationInterval = null;
+            }
+        }
+
+        // --- NUEVO: Manejo de visibilidad de la página ---
+        function handleVisibilityChange() {
+            if (document.hidden) {
+                // La página pasa a segundo plano
+                if (state.chronometer.state === 'Running') {
+                    // Iniciar notificaciones periódicas
+                    showChronoBackgroundNotification();
+                    chronoNotificationInterval = setInterval(() => {
+                        showChronoBackgroundNotification();
+                    }, 30000); // Cada 30 segundos
+                    // Guardar estado para persistencia
+                    saveState();
+                }
+            } else {
+                // La página vuelve a primer plano
+                hideChronoBackgroundNotification();
+                if (state.chronometer.state === 'Running') {
+                    // Recalcular el tiempo y actualizar UI
+                    updateChronoUI();
+                    // Re-solicitar wake lock
+                    requestWakeLock();
+                }
+            }
+        }
+
+        // --- CRONÓMETRO MEJORADO CON SOPORTE EN SEGUNDO PLANO ---
         function startChrono() {
             if (state.chronometer.state === 'Running') return;
             if (state.chronometer.state === 'Paused') {
@@ -509,6 +726,8 @@
                 state.chronometer.state = 'Running';
                 saveState();
                 updateChronoUI();
+                requestWakeLock();
+                requestNotificationPermission();
                 return;
             }
             // Estado Stopped: iniciar desde cero
@@ -517,6 +736,8 @@
             state.chronometer.state = 'Running';
             saveState();
             updateChronoUI();
+            requestWakeLock();
+            requestNotificationPermission();
         }
 
         function pauseChrono() {
@@ -527,6 +748,8 @@
             state.chronometer.state = 'Paused';
             saveState();
             updateChronoUI();
+            releaseWakeLock();
+            hideChronoBackgroundNotification();
         }
 
         function stopChrono() {
@@ -540,6 +763,8 @@
             if (chronoInterval) clearInterval(chronoInterval);
             saveState();
             updateChronoUI();
+            releaseWakeLock();
+            hideChronoBackgroundNotification();
             const totalMinutes = getMinutesFromMs(totalMs);
             if (totalMinutes > 0) {
                 showSaveSessionModal(totalMinutes);
@@ -564,6 +789,10 @@
                     const elapsed = state.chronometer.accumulatedMs + (state.chronometer.startTime ? (Date
                         .now() - state.chronometer.startTime) : 0);
                     display.innerText = formatTime(elapsed);
+                    // Si está visible, ocultar badge de segundo plano
+                    if (!document.hidden) {
+                        hideChronoBackgroundNotification();
+                    }
                 }, 200);
             } else if (state.chronometer.state === 'Paused') {
                 startBtn.classList.remove('hidden');
@@ -580,7 +809,7 @@
             }
         }
 
-        // --- REGISTRO / HISTORIAL MEJORADO ---
+        // --- REGISTRO / HISTORIAL ---
         function renderRegistroView(container) {
             const now = new Date();
             const year = now.getFullYear();
@@ -764,17 +993,21 @@
             panel.scrollIntoView({ behavior: 'smooth' });
         }
 
+        // --- MODIFICADO: editDay ahora usa el time picker tipo reloj ---
         function editDay(dateStr) {
             let record = state.dailyRecords.find(r => r.date === dateStr) || { totalMinutes: 0, notes: '',
                 attendedStudies: [], attendedRevisits: [] };
-            const hoursValue = (record.totalMinutes / 60).toFixed(1);
+            _timePickerMinutes = record.totalMinutes || 0;
             const modal = document.getElementById('modal-container');
             modal.classList.remove('hidden');
             modal.innerHTML = `
                 <div class="bg-white rounded-3xl w-full max-w-sm p-6 animate-slide-up shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar">
                     <h3 class="text-xl font-bold text-slate-800 mb-4">Editar Registro: ${new Date(dateStr+'T12:00:00').toLocaleDateString('es-ES',{day:'numeric',month:'short'})}</h3>
                     <div class="space-y-4">
-                        <div><label class="text-[10px] font-bold text-slate-400 uppercase">Horas</label><input type="number" step="0.1" id="edit-day-hours" value="${hoursValue}" class="w-full bg-slate-50 border-none rounded-2xl p-4 text-xl font-bold text-center"></div>
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase block mb-2 text-center">⏱️ Tiempo exacto</label>
+                            ${generateTimePickerHtml(record.totalMinutes || 0)}
+                        </div>
                         <div><label class="text-[10px] font-bold text-slate-400 uppercase">Estudios atendidos</label><div class="flex flex-wrap gap-2 mt-2" id="edit-studies-list"></div></div>
                         <div><label class="text-[10px] font-bold text-slate-400 uppercase">Revisitas atendidas</label><div class="flex flex-wrap gap-2 mt-2" id="edit-revisits-list"></div></div>
                         <div><label class="text-[10px] font-bold text-slate-400 uppercase">Notas</label><textarea id="edit-day-notes" class="w-full bg-slate-50 border-none rounded-2xl p-4 text-sm">${record.notes || ''}</textarea></div>
@@ -803,8 +1036,7 @@
         }
 
         function saveEditedDay(dateStr) {
-            const hours = parseFloat(document.getElementById('edit-day-hours').value) || 0;
-            const minutes = Math.round(hours * 60);
+            const minutes = getTimePickerTotalMinutes();
             const notes = document.getElementById('edit-day-notes').value;
             const studyChips = document.querySelectorAll('#edit-studies-list .study-chip.bg-accent');
             const attendedStudies = Array.from(studyChips).map(c => c.dataset.id);
@@ -837,7 +1069,7 @@
             }
         }
 
-        // --- ESTUDIOS (con eliminación individual) ---
+        // --- ESTUDIOS ---
         function renderEstudiosView(container) {
             let content = `
                 <div class="animate-slide-up">
@@ -939,7 +1171,7 @@
             }
         }
 
-        // --- REVISITAS (con eliminación y planificación) ---
+        // --- REVISITAS ---
         function renderRevisitasView(container) {
             let content = `
                 <div class="animate-slide-up">
@@ -1029,7 +1261,7 @@
             }
         }
 
-        // --- STATS MEJORADO CON GRÁFICO Y EXPORTACIÓN DE IMAGEN ---
+        // --- STATS ---
         function renderStatsView(container) {
             const monthlyHrs = getMonthlyHours();
             const annualHrs = getAnnualHours();
@@ -1045,7 +1277,6 @@
                 <div class="animate-slide-up" id="stats-capture-area">
                     <div class="flex justify-between items-center mb-6">
                         <h2 class="text-2xl font-bold text-slate-800">📊 Análisis de Progreso</h2>
-                        
                     </div>
                     <div id="capture-content" class="capture-area space-y-6" style="background-color: #f8fafc; padding: 0; border-radius: 0;">
                         <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
@@ -1061,112 +1292,102 @@
                         </div>
                         <div class="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm"><h3 class="font-bold text-slate-800 mb-4">Estadísticas de Actividad</h3><div class="space-y-4"><div class="flex justify-between items-center py-2 border-b border-slate-50"><span class="text-sm text-slate-500">🔥 Racha actual</span><span class="font-bold text-slate-800">${streak} días</span></div><div class="flex justify-between items-center py-2 border-b border-slate-50"><span class="text-sm text-slate-500">Promedio diario necesario</span><span class="font-bold text-slate-800">${((monthlyGoal - monthlyHrs) / Math.max(1, getRemainingDaysInMonth())).toFixed(1)} hrs/día</span></div><div class="flex justify-between items-center py-2 border-b border-slate-50"><span class="text-sm text-slate-500">Estudios distintos este mes</span><span class="font-bold text-slate-800">${getUniqueMonthlyStudies()}</span></div><div class="flex justify-between items-center py-2 border-b border-slate-50"><span class="text-sm text-slate-500">Revisitas realizadas este mes</span><span class="font-bold text-slate-800">${revisitsThisMonth}</span></div><div class="flex justify-between items-center py-2"><span class="text-sm text-slate-500">Total días registrados</span><span class="font-bold text-slate-800">${state.dailyRecords.filter(r=>r.totalMinutes>0).length}</span></div></div></div>
                     </div>
-                
-                <!-- NUEVO: Exportar resumen mensual -->
-<div class="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm mt-6">
-    <h3 class="font-bold text-slate-800 mb-4 flex items-center gap-2">
-        <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-        Exportar Resumen Mensual
-    </h3>
-    <p class="text-slate-500 text-sm mb-4">Personaliza los valores y descarga una imagen con el resumen de este mes.</p>
-    <div class="grid grid-cols-2 gap-4 mb-4">
-        <div>
-            <label class="text-[10px] font-bold text-slate-400 uppercase block mb-1">Horas del mes</label>
-            <input type="number" id="export-hours" value="${monthlyHrs.toFixed(1)}" step="0.1" min="0" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold text-lg text-center">
-        </div>
-        <div>
-            <label class="text-[10px] font-bold text-slate-400 uppercase block mb-1">Estudios realizados</label>
-            <input type="number" id="export-studies" value="${getUniqueMonthlyStudies()}" step="1" min="0" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold text-lg text-center">
-        </div>
-    </div>
-    <div class="flex gap-3 mb-4">
-        <input type="text" id="export-filename" value="resumen_${getDateStr(new Date())}" class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm" placeholder="Nombre del archivo">
-        <button onclick="exportMonthlySummary()" class="bg-accent text-white px-6 py-3 rounded-xl font-bold shadow-lg shadow-accent/20 active:scale-95 transition-all flex items-center gap-2">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-            Exportar como PNG
-        </button>
-    </div>
-    <p class="text-[10px] text-slate-400">La imagen incluirá solo el resumen, no los controles de edición.</p>
-</div>
-                
-                
+                    <div class="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm mt-6">
+                        <h3 class="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                            <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                            Exportar Resumen Mensual
+                        </h3>
+                        <p class="text-slate-500 text-sm mb-4">Personaliza los valores y descarga una imagen con el resumen de este mes.</p>
+                        <div class="grid grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label class="text-[10px] font-bold text-slate-400 uppercase block mb-1">Horas del mes</label>
+                                <input type="number" id="export-hours" value="${monthlyHrs.toFixed(1)}" step="0.1" min="0" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold text-lg text-center">
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-bold text-slate-400 uppercase block mb-1">Estudios realizados</label>
+                                <input type="number" id="export-studies" value="${getUniqueMonthlyStudies()}" step="1" min="0" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold text-lg text-center">
+                            </div>
+                        </div>
+                        <div class="flex gap-3 mb-4">
+                            <input type="text" id="export-filename" value="resumen_${getDateStr(new Date())}" class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm" placeholder="Nombre del archivo">
+                            <button onclick="exportMonthlySummary()" class="bg-accent text-white px-6 py-3 rounded-xl font-bold shadow-lg shadow-accent/20 active:scale-95 transition-all flex items-center gap-2">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                Exportar como PNG
+                            </button>
+                        </div>
+                        <p class="text-[10px] text-slate-400">La imagen incluirá solo el resumen, no los controles de edición.</p>
+                    </div>
                 </div>
             `;
         }
 
         async function exportMonthlySummary() {
-    const hours = document.getElementById('export-hours')?.value || '0';
-    const studies = document.getElementById('export-studies')?.value || '0';
-    const filename = document.getElementById('export-filename')?.value || 'resumen_mensual';
-
-    notify("📸 Generando imagen...");
-
-    const captureDiv = document.createElement('div');
-    captureDiv.style.position = 'absolute';
-    captureDiv.style.left = '-9999px';
-    captureDiv.style.top = '0';
-    captureDiv.style.width = '400px';
-    captureDiv.style.backgroundColor = '#ffffff';
-    captureDiv.style.borderRadius = '32px';
-    captureDiv.style.padding = '32px';
-    captureDiv.style.boxShadow = '0 25px 50px -12px rgba(0, 0, 0, 0.25)';
-    captureDiv.style.fontFamily = "'Plus Jakarta Sans', sans-serif";
-    captureDiv.style.display = 'flex';
-    captureDiv.style.flexDirection = 'column';
-    captureDiv.style.alignItems = 'center';
-    captureDiv.style.textAlign = 'center';
-
-    const now = new Date();
-    const monthYear = now.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
-
-    captureDiv.innerHTML = `
-        <div style="margin-bottom: 24px;">
-            <div style="font-size: 14px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 2px;">Resumen Mensual</div>
-            <div style="font-size: 22px; font-weight: 700; color: #1e293b; margin-top: 4px;">${monthYear}</div>
-        </div>
-        <div style="display: flex; gap: 24px; width: 100%; justify-content: center; margin-bottom: 32px;">
-            <div style="flex: 1; background: #f8fafc; border-radius: 20px; padding: 20px;">
-                <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
-                    <svg width="32" height="32" fill="none" stroke="#1A73E8" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <div style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Horas</div>
-                    <div style="font-size: 36px; font-weight: 800; color: #0f172a; line-height: 1;">${hours}</div>
+            const hours = document.getElementById('export-hours')?.value || '0';
+            const studies = document.getElementById('export-studies')?.value || '0';
+            const filename = document.getElementById('export-filename')?.value || 'resumen_mensual';
+            notify("📸 Generando imagen...");
+            const captureDiv = document.createElement('div');
+            captureDiv.style.position = 'absolute';
+            captureDiv.style.left = '-9999px';
+            captureDiv.style.top = '0';
+            captureDiv.style.width = '400px';
+            captureDiv.style.backgroundColor = '#ffffff';
+            captureDiv.style.borderRadius = '32px';
+            captureDiv.style.padding = '32px';
+            captureDiv.style.boxShadow = '0 25px 50px -12px rgba(0, 0, 0, 0.25)';
+            captureDiv.style.fontFamily = "'Plus Jakarta Sans', sans-serif";
+            captureDiv.style.display = 'flex';
+            captureDiv.style.flexDirection = 'column';
+            captureDiv.style.alignItems = 'center';
+            captureDiv.style.textAlign = 'center';
+            const now = new Date();
+            const monthYear = now.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
+            captureDiv.innerHTML = `
+                <div style="margin-bottom: 24px;">
+                    <div style="font-size: 14px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 2px;">Resumen Mensual</div>
+                    <div style="font-size: 22px; font-weight: 700; color: #1e293b; margin-top: 4px;">${monthYear}</div>
                 </div>
-            </div>
-            <div style="flex: 1; background: #f8fafc; border-radius: 20px; padding: 20px;">
-                <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
-                    <svg width="32" height="32" fill="none" stroke="#10B981" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
-                    <div style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Estudios</div>
-                    <div style="font-size: 36px; font-weight: 800; color: #0f172a; line-height: 1;">${studies}</div>
+                <div style="display: flex; gap: 24px; width: 100%; justify-content: center; margin-bottom: 32px;">
+                    <div style="flex: 1; background: #f8fafc; border-radius: 20px; padding: 20px;">
+                        <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                            <svg width="32" height="32" fill="none" stroke="#1A73E8" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            <div style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Horas</div>
+                            <div style="font-size: 36px; font-weight: 800; color: #0f172a; line-height: 1;">${hours}</div>
+                        </div>
+                    </div>
+                    <div style="flex: 1; background: #f8fafc; border-radius: 20px; padding: 20px;">
+                        <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                            <svg width="32" height="32" fill="none" stroke="#10B981" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
+                            <div style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Estudios</div>
+                            <div style="font-size: 36px; font-weight: 800; color: #0f172a; line-height: 1;">${studies}</div>
+                        </div>
+                    </div>
                 </div>
-            </div>
-        </div>
-        <div style="border-top: 1px solid #e2e8f0; width: 100%; padding-top: 16px; font-size: 12px; color: #94a3b8; font-weight: 500;">
-            Generado por Tiempo de Campo Pro
-        </div>
-    `;
-
-    document.body.appendChild(captureDiv);
-
-    try {
-        const canvas = await html2canvas(captureDiv, {
-            backgroundColor: '#ffffff',
-            scale: 2,
-            useCORS: true,
-            logging: false,
-            allowTaint: true,
-        });
-        document.body.removeChild(captureDiv);
-        const link = document.createElement('a');
-        link.download = `${filename.replace(/[^a-z0-9_\-]/gi, '_')}.png`;
-        link.href = canvas.toDataURL('image/png');
-        link.click();
-        notify("✅ Imagen descargada");
-    } catch (err) {
-        document.body.removeChild(captureDiv);
-        console.error(err);
-        notify("❌ Error al generar imagen");
-    }
-}
+                <div style="border-top: 1px solid #e2e8f0; width: 100%; padding-top: 16px; font-size: 12px; color: #94a3b8; font-weight: 500;">
+                    Generado por Tiempo de Campo Pro
+                </div>
+            `;
+            document.body.appendChild(captureDiv);
+            try {
+                const canvas = await html2canvas(captureDiv, {
+                    backgroundColor: '#ffffff',
+                    scale: 2,
+                    useCORS: true,
+                    logging: false,
+                    allowTaint: true,
+                });
+                document.body.removeChild(captureDiv);
+                const link = document.createElement('a');
+                link.download = `${filename.replace(/[^a-z0-9_\-]/gi, '_')}.png`;
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+                notify("✅ Imagen descargada");
+            } catch (err) {
+                document.body.removeChild(captureDiv);
+                console.error(err);
+                notify("❌ Error al generar imagen");
+            }
+        }
 
         function getLast6MonthsData() {
             const now = new Date();
@@ -1390,16 +1611,19 @@
             input.click();
         }
 
-        // --- MODAL Y SESIÓN ---
+        // --- MODIFICADO: Modal de guardar sesión con time picker tipo reloj ---
         function showSaveSessionModal(minutes) {
-            const hoursValue = (minutes / 60).toFixed(1);
+            _timePickerMinutes = minutes;
             const modal = document.getElementById('modal-container');
             modal.classList.remove('hidden');
             modal.innerHTML = `
                 <div class="bg-white rounded-3xl w-full max-w-sm p-6 animate-slide-up shadow-2xl">
                     <h3 class="text-xl font-bold text-slate-800 mb-4">💾 Guardar Registro</h3>
                     <div class="space-y-4">
-                        <div><label class="text-[10px] font-bold text-slate-400 uppercase">Horas</label><input type="number" step="0.1" id="save-hours" value="${hoursValue}" class="w-full bg-slate-50 border-none rounded-2xl p-4 text-xl font-bold text-center"></div>
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase block mb-2 text-center">⏱️ Tiempo exacto</label>
+                            ${generateTimePickerHtml(minutes)}
+                        </div>
                         <div><label class="text-[10px] font-bold text-slate-400 uppercase">Estudios atendidos</label><div id="modal-studies-list" class="flex flex-wrap gap-2 mt-2"></div></div>
                         <div><label class="text-[10px] font-bold text-slate-400 uppercase">Revisitas atendidas</label><div id="modal-revisits-list" class="flex flex-wrap gap-2 mt-2"></div></div>
                         <div><label class="text-[10px] font-bold text-slate-400 uppercase">Notas</label><textarea id="save-notes" class="w-full bg-slate-50 border-none rounded-2xl p-4 text-sm" placeholder="Notas adicionales..."></textarea></div>
@@ -1421,9 +1645,9 @@
             });
         }
 
+        // --- MODIFICADO: persistSession ahora usa el time picker ---
         function persistSession() {
-            const hours = parseFloat(document.getElementById('save-hours').value) || 0;
-            const minutes = Math.round(hours * 60);
+            const minutes = getTimePickerTotalMinutes();
             const notes = document.getElementById('save-notes').value;
             const studyChips = document.querySelectorAll('#modal-studies-list .study-chip.bg-accent');
             const attendedStudies = Array.from(studyChips).map(c => c.dataset.id);
@@ -1443,7 +1667,6 @@
                     attendedRevisits, revisitsCount: attendedRevisits.length, studySessionsCount: attendedStudies
                     .length });
             }
-            // Actualizar lastVisitDate en las revisitas atendidas
             attendedRevisits.forEach(rid => {
                 const rev = state.revisits.find(r => r.id === rid);
                 if (rev) rev.lastVisitDate = todayStr;
@@ -1461,8 +1684,34 @@
         // --- INICIALIZACIÓN ---
         document.addEventListener('DOMContentLoaded', () => {
             loadState();
-            // Asegurar que el cronómetro esté en estado Stopped al cargar si no hay datos válidos
-            if (state.chronometer.state === 'Running' && !state.chronometer.startTime) {
+
+            // NUEVO: Verificar soporte de Wake Lock
+            if ('wakeLock' in navigator) {
+                wakeLockSupported = true;
+            }
+
+            // NUEVO: Verificar permiso de notificaciones al cargar
+            if ('Notification' in window) {
+                notificationsPermission = Notification.permission;
+            }
+
+            // NUEVO: Listener de cambio de visibilidad
+            document.addEventListener('visibilitychange', handleVisibilityChange);
+
+            // NUEVO: Si el cronómetro estaba corriendo al cargar, reanudar
+            if (state.chronometer.state === 'Running') {
+                // Ya se recalculó en loadState, ahora iniciamos el intervalo
+                updateChronoUI();
+                requestWakeLock();
+                if (document.hidden) {
+                    showChronoBackgroundNotification();
+                    chronoNotificationInterval = setInterval(() => {
+                        showChronoBackgroundNotification();
+                    }, 30000);
+                }
+            }
+
+            if (!state.chronometer.startTime && state.chronometer.state === 'Running') {
                 state.chronometer.state = 'Stopped';
                 state.chronometer.accumulatedMs = 0;
             }
@@ -1470,7 +1719,6 @@
             document.getElementById('modal-container').addEventListener('click', function(e) {
                 if (e.target === this) closeModal();
             });
-            // Actualizar badge del año de servicio
             const range = getServiceYearRange();
             const startMonth = range.start.toLocaleDateString('es-ES', { month: 'short' });
             const endMonth = range.end.toLocaleDateString('es-ES', { month: 'short' });
@@ -1478,7 +1726,6 @@
                 `${startMonth} ${range.start.getFullYear()} - ${endMonth} ${range.end.getFullYear()}`;
         });
 
-        // Prevenir que el cronómetro se resetee al cambiar de vista
         window.addEventListener('beforeunload', () => {
             if (state.chronometer.state === 'Running' && state.chronometer.startTime) {
                 const elapsed = Date.now() - state.chronometer.startTime;
@@ -1487,18 +1734,20 @@
                 state.chronometer.state = 'Paused';
                 saveState();
             }
+            releaseWakeLock();
+            hideChronoBackgroundNotification();
         });
-        
-        
-        
-        
-  if ("serviceWorker" in navigator) {
+
+        if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.register("sw.js")
+                .then(reg => console.log("Service Worker registrado:", reg))
+                .catch(err => console.error("Error al registrar SW:", err));
+        }
+        if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js")
       .then(reg => console.log("Service Worker registrado:", reg))
       .catch(err => console.error("Error al registrar SW:", err));
   }
-
     </script>
 </body>
 </html>
-#
